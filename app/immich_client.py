@@ -35,14 +35,17 @@ class ImmichClient:
         self._session = session or requests.Session()
         self.timeout_seconds = timeout_seconds
 
-    def _headers(self) -> dict[str, str]:
-        return {
+    def _headers(self, *, json_body: bool = False) -> dict[str, str]:
+        headers = {
             "Accept": "application/json",
             "x-api-key": self._api_key,
         }
+        if json_body:
+            headers["Content-Type"] = "application/json"
+        return headers
 
-    def get_duplicates(self) -> list[dict[str, Any]]:
-        url = f"{self.base_url}/duplicates"
+    def _get_json(self, path: str) -> Any:
+        url = f"{self.base_url}{path}"
         try:
             response = self._session.get(
                 url,
@@ -50,15 +53,51 @@ class ImmichClient:
                 timeout=self.timeout_seconds,
             )
             response.raise_for_status()
-            payload = response.json()
+            return response.json()
         except (requests.RequestException, ValueError) as exc:
-            raise ImmichClientError(
-                f"Immich duplicate API request failed at {url}"
-            ) from exc
+            raise ImmichClientError(f"Immich API request failed at {url}") from exc
 
+    def _post_json(self, path: str, payload: dict[str, Any]) -> Any:
+        url = f"{self.base_url}{path}"
+        try:
+            response = self._session.post(
+                url,
+                headers=self._headers(json_body=True),
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+            return response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise ImmichClientError(f"Immich API request failed at {url}") from exc
+
+    def get_duplicates(self) -> list[dict[str, Any]]:
+        payload = self._get_json("/duplicates")
         if not isinstance(payload, list):
             raise ImmichClientError(
                 "Immich duplicate API returned an unexpected payload; expected a JSON array"
             )
+        return payload
 
+    def get_server_features(self) -> dict[str, Any]:
+        payload = self._get_json("/server/features")
+        if not isinstance(payload, dict):
+            raise ImmichClientError(
+                "Immich server features API returned an unexpected payload; expected a JSON object"
+            )
+        if not isinstance(payload.get("trash"), bool):
+            raise ImmichClientError(
+                "Immich server features API did not return the required boolean trash flag"
+            )
+        return payload
+
+    def resolve_duplicates(
+        self,
+        groups: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        payload = self._post_json("/duplicates/resolve", {"groups": groups})
+        if not isinstance(payload, list):
+            raise ImmichClientError(
+                "Immich duplicate resolve API returned an unexpected payload; expected a JSON array"
+            )
         return payload

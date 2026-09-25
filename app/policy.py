@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -9,12 +10,19 @@ from typing import Any
 
 
 MAX_CAPTURE_DELTA_SECONDS = 2.0
+TIMEZONE_OFFSET_SECONDS = 3600.0
 MAX_GPS_DISTANCE_METRES = 25.0
+MAX_ASPECT_RATIO_DELTA = 0.005
 
 HEIC_EXTENSIONS = {".heic", ".heif"}
 JPEG_EXTENSIONS = {".jpg", ".jpeg"}
 HEIC_MIME_TYPES = {"image/heic", "image/heif"}
 JPEG_MIME_TYPES = {"image/jpeg", "image/jpg"}
+
+CURATOR_STEM_RE = re.compile(
+    r"^(?P<clock>\d{2}-\d{2}-\d{2})-(?P<slot>\d{2})-(?P<label>.+)$",
+    re.IGNORECASE,
+)
 
 
 class DecisionKind(str, Enum):
@@ -190,6 +198,62 @@ def _asset_summary(asset: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _filename_relation(heic_name: str, jpeg_name: str) -> str | None:
+    heic_stem = Path(heic_name).stem.casefold()
+    jpeg_stem = Path(jpeg_name).stem.casefold()
+
+    if heic_stem == jpeg_stem:
+        return "exact"
+
+    heic_match = CURATOR_STEM_RE.fullmatch(heic_stem)
+    jpeg_match = CURATOR_STEM_RE.fullmatch(jpeg_stem)
+    if not heic_match or not jpeg_match:
+        return None
+
+    if (
+        heic_match.group("clock") == jpeg_match.group("clock")
+        and heic_match.group("label") == jpeg_match.group("label")
+        and heic_match.group("slot") != jpeg_match.group("slot")
+    ):
+        return "curator_collision_suffix"
+
+    return None
+
+
+def _aspect_ratio_delta(
+    heic_dimensions: tuple[int, int],
+    jpeg_dimensions: tuple[int, int],
+) -> float:
+    heic_width, heic_height = heic_dimensions
+    jpeg_width, jpeg_height = jpeg_dimensions
+    left = heic_width * jpeg_height
+    right = jpeg_width * heic_height
+    return abs(left - right) / max(left, right)
+
+
+def _dimension_relation(
+    heic_dimensions: tuple[int, int],
+    jpeg_dimensions: tuple[int, int],
+) -> tuple[str | None, float]:
+    ratio_delta = _aspect_ratio_delta(heic_dimensions, jpeg_dimensions)
+
+    if heic_dimensions == jpeg_dimensions:
+        return "equal", ratio_delta
+
+    heic_width, heic_height = heic_dimensions
+    jpeg_width, jpeg_height = jpeg_dimensions
+    heic_is_higher_resolution = (
+        heic_width >= jpeg_width
+        and heic_height >= jpeg_height
+        and (heic_width > jpeg_width or heic_height > jpeg_height)
+    )
+
+    if heic_is_higher_resolution and ratio_delta <= MAX_ASPECT_RATIO_DELTA:
+        return "heic_higher_resolution_equivalent", ratio_delta
+
+    return None, ratio_delta
+
+
 def evaluate_duplicate_group(group: dict[str, Any]) -> Decision:
     duplicate_id = str(group.get("duplicateId") or "")
     assets = list(group.get("assets") or [])
@@ -201,6 +265,7 @@ def evaluate_duplicate_group(group: dict[str, Any]) -> Decision:
         "assets": [_asset_summary(asset) for asset in assets],
     }
     reasons: list[str] = []
+    safe_basis: list[str] = []
 
     heic_assets = [asset for asset in assets if _format_of(asset) == "heic"]
     jpeg_assets = [asset for asset in assets if _format_of(asset) == "jpeg"]
@@ -234,8 +299,12 @@ def evaluate_duplicate_group(group: dict[str, Any]) -> Decision:
     if str(heic.get("type") or "").upper() != "IMAGE" or str(jpeg.get("type") or "").upper() != "IMAGE":
         _append_once(reasons, "non_image_asset")
 
-    if Path(heic_name).stem.casefold() != Path(jpeg_name).stem.casefold():
+    filename_relation = _filename_relation(heic_name, jpeg_name)
+    evidence["filename_relation"] = filename_relation
+    if filename_relation is None:
         _append_once(reasons, "filename_stem_mismatch")
+    elif filename_relation == "curator_collision_suffix":
+        safe_basis.append("curator_collision_suffix")
 
     heic_dimensions = _dimensions(heic)
     jpeg_dimensions = _dimensions(jpeg)
@@ -244,39 +313,62 @@ def evaluate_duplicate_group(group: dict[str, Any]) -> Decision:
 
     if heic_dimensions is None or jpeg_dimensions is None:
         _append_once(reasons, "missing_dimensions")
-    elif heic_dimensions != jpeg_dimensions:
-        _append_once(reasons, "dimension_mismatch")
+        evidence["dimension_relation"] = None
+        evidence["aspect_ratio_delta"] = None
+    else:
+        dimension_relation, ratio_delta = _dimension_relation(
+            heic_dimensions,
+            jpeg_dimensions,
+        )
+        evidence["dimension_relation"] = dimension_relation
+        evidence["aspect_ratio_delta"] = round(ratio_delta, 6)
+        if dimension_relation is None:
+            _append_once(reasons, "dimension_mismatch")
+        elif dimension_relation == "heic_higher_resolution_equivalent":
+            safe_basis.append("heic_higher_resolution_equivalent")
 
     heic_time = _capture_time(heic)
     jpeg_time = _capture_time(jpeg)
+    capture_delta: float | None = None
     if heic_time is None or jpeg_time is None:
         _append_once(reasons, "missing_capture_time")
         evidence["capture_delta_seconds"] = None
     else:
-        delta = abs((heic_time - jpeg_time).total_seconds())
-        evidence["capture_delta_seconds"] = delta
-        if delta > MAX_CAPTURE_DELTA_SECONDS:
-            _append_once(reasons, "capture_time_mismatch")
+        capture_delta = abs((heic_time - jpeg_time).total_seconds())
+        evidence["capture_delta_seconds"] = capture_delta
 
     heic_make, heic_model = _camera_identity(heic)
     jpeg_make, jpeg_model = _camera_identity(jpeg)
     if _different_known_text(heic_make, jpeg_make) or _different_known_text(heic_model, jpeg_model):
         _append_once(reasons, "camera_mismatch")
 
+    gps_distance: float | None = None
     try:
         heic_coords = _coordinates(heic)
         jpeg_coords = _coordinates(jpeg)
     except ValueError:
         heic_coords = jpeg_coords = None
         _append_once(reasons, "invalid_gps_data")
+        evidence["gps_distance_metres"] = None
     else:
         if heic_coords is not None and jpeg_coords is not None:
-            distance = _distance_metres(heic_coords, jpeg_coords)
-            evidence["gps_distance_metres"] = round(distance, 3)
-            if distance > MAX_GPS_DISTANCE_METRES:
+            gps_distance = _distance_metres(heic_coords, jpeg_coords)
+            evidence["gps_distance_metres"] = round(gps_distance, 3)
+            if gps_distance > MAX_GPS_DISTANCE_METRES:
                 _append_once(reasons, "gps_mismatch")
         else:
             evidence["gps_distance_metres"] = None
+
+    if capture_delta is not None and capture_delta > MAX_CAPTURE_DELTA_SECONDS:
+        timezone_offset_match = (
+            capture_delta == TIMEZONE_OFFSET_SECONDS
+            and gps_distance is not None
+            and gps_distance <= MAX_GPS_DISTANCE_METRES
+        )
+        if timezone_offset_match:
+            safe_basis.append("timezone_offset_3600")
+        else:
+            _append_once(reasons, "capture_time_mismatch")
 
     if heic.get("ownerId") != jpeg.get("ownerId"):
         _append_once(reasons, "owner_mismatch")
@@ -302,6 +394,8 @@ def evaluate_duplicate_group(group: dict[str, Any]) -> Decision:
             reasons=tuple(reasons),
             evidence=evidence,
         )
+
+    evidence["safe_basis"] = safe_basis or ["exact_pair"]
 
     return Decision(
         duplicate_id=duplicate_id,

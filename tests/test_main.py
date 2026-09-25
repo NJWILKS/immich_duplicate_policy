@@ -65,7 +65,7 @@ class FakeClient:
         ]
 
 
-def test_v01_refuses_any_non_report_mode(monkeypatch):
+def test_v02_refuses_any_non_report_mode(monkeypatch):
     monkeypatch.setenv("MODE", "apply")
 
     assert main() == 2
@@ -79,6 +79,12 @@ def test_scan_writes_latest_snapshot_and_append_only_audit(tmp_path):
     assert latest["duplicate_groups"] == 1
     assert latest["decisions"][0]["decision"] == "SAFE_HEIC_CANDIDATE"
     assert latest["decisions"][0]["keep_asset_id"] == "heic-1"
+    assert latest["summary"]["decisions"] == {
+        "SAFE_HEIC_CANDIDATE": 1,
+        "REVIEW": 0,
+    }
+    assert latest["summary"]["safe_basis"] == {"exact_pair": 1}
+    assert latest["summary"]["review_reasons"] == {}
 
     lines = (tmp_path / "decisions.jsonl").read_text().splitlines()
     assert len(lines) == 2

@@ -296,3 +296,186 @@ def test_exact_pair_evidence_identifies_which_asset_has_live_photo_relationship(
     summaries = {item["id"]: item for item in decision.evidence["assets"]}
     assert summaries["heic-id"]["live_photo_video_id"] == "video-id"
     assert summaries["jpeg-id"]["live_photo_video_id"] is None
+
+
+def test_higher_resolution_heic_with_same_aspect_ratio_is_safe():
+    heic = asset("heic-id", "IMG_0001.HEIC", mime="image/heic", width=4032, height=3024)
+    jpeg = asset("jpeg-id", "IMG_0001.JPG", mime="image/jpeg", width=2048, height=1536)
+
+    decision = evaluate_duplicate_group(group(heic=heic, jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.SAFE_HEIC_CANDIDATE
+    assert decision.keep_asset_id == "heic-id"
+    assert decision.trash_asset_id == "jpeg-id"
+    assert decision.evidence["dimension_relation"] == "heic_higher_resolution_equivalent"
+    assert "heic_higher_resolution_equivalent" in decision.evidence["safe_basis"]
+
+
+def test_higher_pixel_count_does_not_override_material_aspect_ratio_change():
+    heic = asset("heic-id", "IMG_0001.HEIC", mime="image/heic", width=4032, height=3024)
+    jpeg = asset("jpeg-id", "IMG_0001.JPG", mime="image/jpeg", width=1920, height=1080)
+
+    decision = evaluate_duplicate_group(group(heic=heic, jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.REVIEW
+    assert "dimension_mismatch" in decision.reasons
+
+
+def test_lower_resolution_heic_still_requires_review():
+    heic = asset("heic-id", "IMG_0001.HEIC", mime="image/heic", width=2048, height=1536)
+    jpeg = asset("jpeg-id", "IMG_0001.JPG", mime="image/jpeg", width=4032, height=3024)
+
+    decision = evaluate_duplicate_group(group(heic=heic, jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.REVIEW
+    assert "dimension_mismatch" in decision.reasons
+
+
+def test_curator_collision_slot_difference_is_safe():
+    heic = asset(
+        "heic-id",
+        "19-52-34-02-Stubbin Close.heic",
+        mime="image/heic",
+    )
+    jpeg = asset(
+        "jpeg-id",
+        "19-52-34-01-Stubbin Close.jpg",
+        mime="image/jpeg",
+    )
+
+    decision = evaluate_duplicate_group(group(heic=heic, jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.SAFE_HEIC_CANDIDATE
+    assert decision.evidence["filename_relation"] == "curator_collision_suffix"
+    assert "curator_collision_suffix" in decision.evidence["safe_basis"]
+
+
+def test_filename_time_component_difference_is_not_treated_as_collision_slot():
+    heic = asset(
+        "heic-id",
+        "11-51-40-01-Hakid.heic",
+        mime="image/heic",
+    )
+    jpeg = asset(
+        "jpeg-id",
+        "11-51-39-01-Hakid.jpeg",
+        mime="image/jpeg",
+    )
+
+    decision = evaluate_duplicate_group(group(heic=heic, jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.REVIEW
+    assert "filename_stem_mismatch" in decision.reasons
+
+
+def test_exact_one_hour_offset_with_matching_gps_is_safe():
+    heic = asset(
+        "heic-id",
+        "IMG_0001.HEIC",
+        mime="image/heic",
+        taken="2024-05-01T12:34:56.000Z",
+    )
+    jpeg = asset(
+        "jpeg-id",
+        "IMG_0001.JPG",
+        mime="image/jpeg",
+        taken="2024-05-01T13:34:56.000Z",
+    )
+
+    decision = evaluate_duplicate_group(group(heic=heic, jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.SAFE_HEIC_CANDIDATE
+    assert decision.evidence["capture_delta_seconds"] == 3600.0
+    assert decision.evidence["gps_distance_metres"] == 0.0
+    assert "timezone_offset_3600" in decision.evidence["safe_basis"]
+
+
+def test_one_hour_offset_requires_gps_on_both_assets():
+    heic = asset(
+        "heic-id",
+        "IMG_0001.HEIC",
+        mime="image/heic",
+        taken="2024-05-01T12:34:56.000Z",
+        latitude=None,
+        longitude=None,
+    )
+    jpeg = asset(
+        "jpeg-id",
+        "IMG_0001.JPG",
+        mime="image/jpeg",
+        taken="2024-05-01T13:34:56.000Z",
+        latitude=None,
+        longitude=None,
+    )
+
+    decision = evaluate_duplicate_group(group(heic=heic, jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.REVIEW
+    assert "capture_time_mismatch" in decision.reasons
+
+
+def test_one_hour_offset_requires_gps_within_existing_distance_limit():
+    heic = asset(
+        "heic-id",
+        "IMG_0001.HEIC",
+        mime="image/heic",
+        taken="2024-05-01T12:34:56.000Z",
+        latitude=54.0,
+        longitude=-1.0,
+    )
+    jpeg = asset(
+        "jpeg-id",
+        "IMG_0001.JPG",
+        mime="image/jpeg",
+        taken="2024-05-01T13:34:56.000Z",
+        latitude=55.0,
+        longitude=-1.0,
+    )
+
+    decision = evaluate_duplicate_group(group(heic=heic, jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.REVIEW
+    assert "capture_time_mismatch" in decision.reasons
+    assert "gps_mismatch" in decision.reasons
+
+
+def test_near_one_hour_offset_is_not_promoted():
+    jpeg = asset(
+        "jpeg-id",
+        "IMG_0001.JPG",
+        mime="image/jpeg",
+        taken="2024-05-01T13:34:55.999Z",
+    )
+
+    decision = evaluate_duplicate_group(group(jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.REVIEW
+    assert "capture_time_mismatch" in decision.reasons
+
+
+def test_promotions_can_combine_and_remain_auditable():
+    heic = asset(
+        "heic-id",
+        "19-52-34-02-Stubbin Close.heic",
+        mime="image/heic",
+        width=4032,
+        height=3024,
+        taken="2024-05-01T12:34:56.000Z",
+    )
+    jpeg = asset(
+        "jpeg-id",
+        "19-52-34-01-Stubbin Close.jpg",
+        mime="image/jpeg",
+        width=2048,
+        height=1536,
+        taken="2024-05-01T13:34:56.000Z",
+    )
+
+    decision = evaluate_duplicate_group(group(heic=heic, jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.SAFE_HEIC_CANDIDATE
+    assert decision.evidence["safe_basis"] == [
+        "curator_collision_suffix",
+        "heic_higher_resolution_equivalent",
+        "timezone_offset_3600",
+    ]

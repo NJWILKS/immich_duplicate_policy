@@ -43,11 +43,20 @@ def _format_of(asset: dict[str, Any]) -> str | None:
     mime = _normalise_text(asset.get("originalMimeType"))
     suffix = Path(str(asset.get("originalFileName") or "")).suffix.casefold()
 
-    if mime in HEIC_MIME_TYPES or suffix in HEIC_EXTENSIONS:
-        return "heic"
-    if mime in JPEG_MIME_TYPES or suffix in JPEG_EXTENSIONS:
-        return "jpeg"
-    return None
+    mime_kind = (
+        "heic" if mime in HEIC_MIME_TYPES
+        else "jpeg" if mime in JPEG_MIME_TYPES
+        else None
+    )
+    suffix_kind = (
+        "heic" if suffix in HEIC_EXTENSIONS
+        else "jpeg" if suffix in JPEG_EXTENSIONS
+        else None
+    )
+
+    if mime_kind and suffix_kind and mime_kind != suffix_kind:
+        return "conflict"
+    return mime_kind or suffix_kind
 
 
 def _dimensions(asset: dict[str, Any]) -> tuple[int, int] | None:

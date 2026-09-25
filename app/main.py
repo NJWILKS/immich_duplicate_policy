@@ -107,13 +107,157 @@ def scan_once(client: ImmichClient, state_dir: Path) -> int:
     return len(groups)
 
 
-def main() -> int:
-    mode = os.getenv("MODE", "report").strip().casefold()
-    if mode != "report":
+def _chunks(items: list[dict], size: int):
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def apply_once(client: ImmichClient, state_dir: Path, *, batch_size: int = 100) -> int:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    started = datetime.now(timezone.utc)
+    apply_id = str(uuid.uuid4())
+
+    features = client.get_server_features()
+    if features.get("trash") is not True:
         print(
-            "Only MODE=report is supported in v0.2; this build cannot modify Immich.",
+            "Refusing MODE=apply because Immich trash is disabled; "
+            "duplicate resolution would permanently delete trashed assets.",
             file=sys.stderr,
         )
+        return 2
+
+    # Re-read and re-evaluate the live duplicate set immediately before mutation.
+    groups = client.get_duplicates()
+    decisions = [evaluate_duplicate_group(group) for group in groups]
+    candidates = [
+        decision
+        for decision in decisions
+        if decision.kind is DecisionKind.SAFE_HEIC_CANDIDATE
+    ]
+
+    requests_by_id: dict[str, dict] = {}
+    candidate_by_id = {decision.duplicate_id: decision for decision in candidates}
+    resolve_groups: list[dict] = []
+    for decision in candidates:
+        request = {
+            "duplicateId": decision.duplicate_id,
+            "keepAssetIds": [decision.keep_asset_id],
+            "trashAssetIds": [decision.trash_asset_id],
+        }
+        requests_by_id[decision.duplicate_id] = request
+        resolve_groups.append(request)
+
+    print(
+        f"Apply preflight: {len(groups):,} live duplicate groups, "
+        f"{len(candidates):,} SAFE_HEIC_CANDIDATE"
+    )
+    print("Immich trash is enabled; resolving all safe candidates via /duplicates/resolve")
+
+    results_by_id: dict[str, dict] = {}
+    batch_error: str | None = None
+
+    for batch_number, batch in enumerate(_chunks(resolve_groups, max(1, batch_size)), start=1):
+        try:
+            batch_results = client.resolve_duplicates(batch)
+        except ImmichClientError as exc:
+            batch_error = str(exc)
+            print(
+                f"Apply stopped at batch {batch_number}: {batch_error}",
+                file=sys.stderr,
+            )
+            break
+
+        for result in batch_results:
+            result_id = str(result.get("id") or "")
+            if result_id:
+                results_by_id[result_id] = result
+
+        print(
+            f"Resolved batch {batch_number}: "
+            f"{sum(1 for result in batch_results if result.get('success') is True):,}/"
+            f"{len(batch):,} succeeded"
+        )
+
+    actions = []
+    success_count = 0
+    failure_count = 0
+    for duplicate_id, request in requests_by_id.items():
+        decision = candidate_by_id[duplicate_id]
+        result = results_by_id.get(duplicate_id)
+        if result is None:
+            result = {
+                "id": duplicate_id,
+                "success": False,
+                "error": "NO_RESULT",
+                "errorMessage": batch_error or "Immich returned no result for this group",
+            }
+
+        if result.get("success") is True:
+            success_count += 1
+        else:
+            failure_count += 1
+
+        actions.append(
+            {
+                "duplicate_id": duplicate_id,
+                "keep_asset_id": decision.keep_asset_id,
+                "trash_asset_id": decision.trash_asset_id,
+                "safe_basis": list(decision.evidence.get("safe_basis", [])),
+                "request": request,
+                "result": result,
+            }
+        )
+
+    completed = datetime.now(timezone.utc)
+    apply_payload = {
+        "apply_id": apply_id,
+        "started_at": started.isoformat(),
+        "completed_at": completed.isoformat(),
+        "source_duplicate_groups": len(groups),
+        "candidate_count": len(candidates),
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "batch_size": max(1, batch_size),
+        "trash_enabled": True,
+        "actions": actions,
+    }
+
+    last_apply_path = state_dir / "last_apply.json"
+    apply_history_path = state_dir / "apply_actions.jsonl"
+    last_apply_path.write_text(
+        json.dumps(apply_payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    with apply_history_path.open("a", encoding="utf-8") as audit:
+        for action in actions:
+            audit.write(
+                json.dumps(
+                    {
+                        "apply_id": apply_id,
+                        "started_at": started.isoformat(),
+                        **action,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    print(
+        f"Apply complete: {success_count:,} succeeded, {failure_count:,} failed. "
+        f"Audit: {last_apply_path}"
+    )
+
+    # Always re-read Immich after mutation so latest.json describes the actual
+    # remaining duplicate queue, not the pre-apply plan.
+    scan_once(client, state_dir)
+
+    return 0 if failure_count == 0 and batch_error is None else 1
+
+
+def main() -> int:
+    mode = os.getenv("MODE", "report").strip().casefold()
+    if mode not in {"report", "apply"}:
+        print("MODE must be either report or apply.", file=sys.stderr)
         return 2
 
     try:
@@ -121,12 +265,25 @@ def main() -> int:
         api_key = _required_env("IMMICH_API_KEY")
         interval = max(0, _int_env("SCAN_INTERVAL_SECONDS", 0))
         timeout = max(1, _int_env("IMMICH_TIMEOUT_SECONDS", 30))
+        batch_size = max(1, _int_env("APPLY_BATCH_SIZE", 100))
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
     state_dir = Path(os.getenv("STATE_DIR", "/state"))
     client = ImmichClient(url, api_key, timeout_seconds=timeout)
+
+    if mode == "apply":
+        # Apply is deliberately one-shot even when SCAN_INTERVAL_SECONDS is set.
+        # The long-running compose service remains MODE=report.
+        try:
+            return apply_once(client, state_dir, batch_size=batch_size)
+        except ImmichClientError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"Duplicate policy apply failed: {exc}", file=sys.stderr)
+            return 1
 
     while True:
         try:

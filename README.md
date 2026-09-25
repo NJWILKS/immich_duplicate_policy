@@ -1,39 +1,55 @@
 # Immich Duplicate Policy
 
-Conservative policy service for reviewing Immich duplicate groups and identifying safe HEIC/HEIF-over-JPEG candidates.
+Conservative policy service for reviewing Immich duplicate groups and automatically resolving only the well-understood HEIC/HEIF-over-JPEG cases.
 
-## v0.2 contract
+## v0.3 contract
 
-v0.2 is still deliberately read-only. It uses Immich's `GET /api/duplicates` endpoint, evaluates each duplicate group, and writes an audit report. There is no resolve/delete API method in this release and `MODE` remains hard-locked to `report`.
+v0.3 keeps the v0.2 classification policy and adds a one-shot `MODE=apply`.
 
-A group is marked `SAFE_HEIC_CANDIDATE` only when it is exactly one HEIC/HEIF plus one JPEG, both belong to the same owner, both are images, MIME type and filename extension do not conflict, known camera identity does not conflict, and neither asset is a Live Photo, Immich edit, offline, trashed, or part of a stack.
+The long-running Docker service remains `MODE=report`. Apply mode is intended to be run explicitly with `docker compose run --rm -e MODE=apply ...`; it never loops.
 
-v0.2 allows three narrowly-scoped, evidence-backed relaxations:
+Immediately before making any change, apply mode:
 
-- **Curator collision slot** — filenames may differ only in the curator collision slot in names shaped like `HH-MM-SS-01-Label` vs `HH-MM-SS-02-Label`; changes to the clock or label still require review.
-- **Higher-resolution HEIC** — dimensions may differ only when the HEIC is at least as large on both axes, larger on at least one axis, and the aspect-ratio delta is at most 0.5%.
-- **Exact one-hour timezone offset** — capture times may differ by exactly 3600 seconds only when both assets have valid GPS and the recorded locations are within the existing 25 metre GPS tolerance.
+1. checks `GET /api/server/features`;
+2. refuses to run unless Immich trash is enabled;
+3. fetches the live duplicate set again;
+4. re-evaluates every group using the current policy;
+5. sends only current `SAFE_HEIC_CANDIDATE` groups to Immich's official `POST /api/duplicates/resolve` endpoint.
 
-Normal capture-time tolerance remains two seconds. Missing dimensions or capture time still require review.
+For each safe group, the HEIC/HEIF is sent as `keepAssetIds` and the JPEG as `trashAssetIds`. Immich therefore performs its normal duplicate-resolution behaviour, including merging supported metadata into the keeper before trashing the duplicate.
 
-The HEIC/HEIF is always the proposed keeper for safe groups. Immich's own suggested keeper is recorded as evidence but does not drive the policy.
+Apply mode processes all current safe candidates. Internal batches default to 100 groups and are not a limit on the total run.
 
-Every safe decision includes a `safe_basis` list so combined relaxations remain auditable. Examples are `exact_pair`, `curator_collision_suffix`, `heic_higher_resolution_equivalent`, and `timezone_offset_3600`.
+If Immich reports a failure for any group, the run records it and exits non-zero. If an API request fails mid-run, processing stops rather than blindly retrying an uncertain mutation.
 
-Everything else remains `REVIEW`. In particular, v0.2 does not automatically resolve Live Photos, multi-asset groups, JPEG/JPEG groups, videos, ambiguous filename changes, arbitrary timestamp differences, or genuinely conflicting image evidence.
+After execution, the service fetches duplicates again and rewrites `latest.json` from the actual remaining queue.
+
+### Safety boundary
+
+The classifier still requires exactly one HEIC/HEIF plus one JPEG, the same owner, image assets, no MIME/extension conflict, no conflicting known camera identity, and no Live Photo, Immich edit, offline, trashed, or stacked asset.
+
+The three v0.2 evidence-backed relaxations remain:
+
+- **Curator collision slot** — only the curator collision slot may differ in names shaped like `HH-MM-SS-01-Label` vs `HH-MM-SS-02-Label`.
+- **Higher-resolution HEIC** — the HEIC may be larger when it is at least as large on both axes and aspect-ratio delta is at most 0.5%.
+- **Exact one-hour timezone offset** — capture times may differ by exactly 3600 seconds only when both assets have valid GPS and locations are within 25 metres.
+
+Everything else remains `REVIEW`.
+
+Every safe decision carries a `safe_basis` such as `exact_pair`, `curator_collision_suffix`, `heic_higher_resolution_equivalent`, or `timezone_offset_3600`.
 
 ## Configuration
-
-Copy `.env.example` to `.env` and set:
 
 ```env
 IMMICH_URL=https://photos.example.com
 IMMICH_API_KEY=replace-me
 MODE=report
 SCAN_INTERVAL_SECONDS=3600
+IMMICH_TIMEOUT_SECONDS=30
+APPLY_BATCH_SIZE=100
 ```
 
-The API key only needs duplicate read access for v0.2.
+Report mode only needs duplicate-read access. Apply mode also requires the Immich API-key permissions needed by duplicate resolution and asset deletion.
 
 ## Docker
 
@@ -43,26 +59,33 @@ sudo install -d -o 10001 -g 10001 state
 docker compose up -d --build
 ```
 
-The default compose configuration scans once per hour. Set `SCAN_INTERVAL_SECONDS=0` to run once and exit.
+The normal service scans once per hour in report mode. No ports are exposed. The container filesystem is read-only apart from the mounted `/state` directory.
 
-No ports are exposed. The container filesystem is read-only apart from the mounted `/state` directory. The image runs as UID/GID `10001:10001`, so the host `state/` directory must be writable by that identity.
+## Execute all safe candidates
 
-## Reports
+Apply is deliberately explicit and one-shot:
 
-Two files are written under `state/`:
+```bash
+docker compose run --rm -e MODE=apply -e SCAN_INTERVAL_SECONDS=0 immich-duplicate-policy
+```
 
-- `latest.json` — complete latest scan snapshot;
-- `decisions.jsonl` — append-only audit history.
+The persistent compose service still remains report-only after that command exits.
 
-Each decision contains the duplicate group ID, proposed keeper/trash asset IDs when safe, review reason codes, Immich's suggested keeper IDs, filenames, dimensions, capture-time delta, GPS distance where available, file sizes, and compact per-asset state.
+Apply refuses to run if Immich trash is disabled because Immich's duplicate resolver permanently deletes trash candidates when the server trash feature is off.
 
-`latest.json` also contains a summary with:
+## Reports and audit
 
-- decision counts;
-- counts for each safe basis;
-- counts for each remaining review reason.
+Report mode writes:
 
-The intent is not to eliminate every manual decision. The service removes the well-understood, repetitive cases and leaves a smaller, clearly classified queue for human review.
+- `state/latest.json` — current duplicate snapshot and summary;
+- `state/decisions.jsonl` — append-only classification history.
+
+Apply mode additionally writes:
+
+- `state/last_apply.json` — complete latest execution summary and per-group results;
+- `state/apply_actions.jsonl` — append-only execution audit.
+
+After apply finishes, `latest.json` is regenerated from Immich so it describes the remaining duplicate queue.
 
 ## Development
 
@@ -72,7 +95,3 @@ pytest
 ```
 
 CI compiles the package, runs the full test suite, and builds the Docker image.
-
-## Next step
-
-Run v0.2 against the real Immich instance in report mode and confirm the expected safe/review population before designing any write-capable release.

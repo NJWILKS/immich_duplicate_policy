@@ -26,7 +26,11 @@ class FakeSession:
         self.calls = []
 
     def get(self, url, *, headers, timeout):
-        self.calls.append((url, headers, timeout))
+        self.calls.append(("GET", url, headers, timeout, None))
+        return self.response
+
+    def post(self, url, *, headers, json, timeout):
+        self.calls.append(("POST", url, headers, timeout, json))
         return self.response
 
 
@@ -52,9 +56,11 @@ def test_get_duplicates_uses_official_endpoint_and_api_key_header():
     assert result == response._payload
     assert session.calls == [
         (
+            "GET",
             "https://photos.example.test/api/duplicates",
             {"Accept": "application/json", "x-api-key": "secret"},
             12,
+            None,
         )
     ]
 
@@ -75,3 +81,76 @@ def test_get_duplicates_wraps_http_errors_without_leaking_api_key():
         client.get_duplicates()
 
     assert "super-secret" not in str(exc.value)
+
+
+def test_get_server_features_requires_boolean_trash_flag():
+    session = FakeSession(FakeResponse({"trash": True, "duplicateDetection": True}))
+    client = ImmichClient("https://photos.example.test", "secret", session=session)
+
+    result = client.get_server_features()
+
+    assert result["trash"] is True
+    assert session.calls[0][0:2] == ("GET", "https://photos.example.test/api/server/features")
+
+    bad = ImmichClient(
+        "https://photos.example.test",
+        "secret",
+        session=FakeSession(FakeResponse({"duplicateDetection": True})),
+    )
+    with pytest.raises(ImmichClientError, match="trash"):
+        bad.get_server_features()
+
+
+def test_resolve_duplicates_posts_official_duplicate_resolve_payload():
+    response = FakeResponse([{"id": "group-1", "success": True}])
+    session = FakeSession(response)
+    client = ImmichClient("https://photos.example.test", "secret", session=session)
+
+    result = client.resolve_duplicates(
+        [
+            {
+                "duplicateId": "group-1",
+                "keepAssetIds": ["heic-1"],
+                "trashAssetIds": ["jpeg-1"],
+            }
+        ]
+    )
+
+    assert result == [{"id": "group-1", "success": True}]
+    assert session.calls == [
+        (
+            "POST",
+            "https://photos.example.test/api/duplicates/resolve",
+            {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "x-api-key": "secret",
+            },
+            30,
+            {
+                "groups": [
+                    {
+                        "duplicateId": "group-1",
+                        "keepAssetIds": ["heic-1"],
+                        "trashAssetIds": ["jpeg-1"],
+                    }
+                ]
+            },
+        )
+    ]
+
+
+def test_resolve_duplicates_rejects_unexpected_payload():
+    session = FakeSession(FakeResponse({"success": True}))
+    client = ImmichClient("https://photos.example.test", "secret", session=session)
+
+    with pytest.raises(ImmichClientError, match="expected a JSON array"):
+        client.resolve_duplicates(
+            [
+                {
+                    "duplicateId": "group-1",
+                    "keepAssetIds": ["heic-1"],
+                    "trashAssetIds": ["jpeg-1"],
+                }
+            ]
+        )

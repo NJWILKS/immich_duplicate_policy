@@ -218,3 +218,81 @@ def test_cross_owner_group_requires_review():
 
     assert decision.kind is DecisionKind.REVIEW
     assert "owner_mismatch" in decision.reasons
+
+
+def test_review_evidence_summarises_every_asset_even_when_group_is_not_exact_pair():
+    assets = [
+        asset("heic-1", "IMG_1.HEIC", mime="image/heic", live_photo_video_id="video-1"),
+        asset("jpeg-1", "IMG_1.JPG", mime="image/jpeg"),
+        asset("jpeg-2", "IMG_1-copy.JPG", mime="image/jpeg", width=2048, height=1536),
+    ]
+
+    decision = evaluate_duplicate_group(group(assets=assets))
+
+    assert decision.kind is DecisionKind.REVIEW
+    assert decision.reasons == ("not_exact_heic_jpeg_pair",)
+    assert decision.evidence["asset_count"] == 3
+    assert decision.evidence["assets"] == [
+        {
+            "id": "heic-1",
+            "filename": "IMG_1.HEIC",
+            "mime_type": "image/heic",
+            "format": "heic",
+            "type": "IMAGE",
+            "dimensions": [4032, 3024],
+            "bytes": 1_000_000,
+            "capture_time": "2024-05-01T12:34:56",
+            "live_photo_video_id": "video-1",
+            "is_edited": False,
+            "is_offline": False,
+            "is_trashed": False,
+            "stacked": False,
+        },
+        {
+            "id": "jpeg-1",
+            "filename": "IMG_1.JPG",
+            "mime_type": "image/jpeg",
+            "format": "jpeg",
+            "type": "IMAGE",
+            "dimensions": [4032, 3024],
+            "bytes": 1_000_000,
+            "capture_time": "2024-05-01T12:34:56",
+            "live_photo_video_id": None,
+            "is_edited": False,
+            "is_offline": False,
+            "is_trashed": False,
+            "stacked": False,
+        },
+        {
+            "id": "jpeg-2",
+            "filename": "IMG_1-copy.JPG",
+            "mime_type": "image/jpeg",
+            "format": "jpeg",
+            "type": "IMAGE",
+            "dimensions": [2048, 1536],
+            "bytes": 1_000_000,
+            "capture_time": "2024-05-01T12:34:56",
+            "live_photo_video_id": None,
+            "is_edited": False,
+            "is_offline": False,
+            "is_trashed": False,
+            "stacked": False,
+        },
+    ]
+
+
+def test_exact_pair_evidence_identifies_which_asset_has_live_photo_relationship():
+    heic = asset(
+        "heic-id",
+        "IMG_0001.HEIC",
+        mime="image/heic",
+        live_photo_video_id="video-id",
+    )
+
+    decision = evaluate_duplicate_group(group(heic=heic))
+
+    assert decision.kind is DecisionKind.REVIEW
+    assert "live_photo_asset" in decision.reasons
+    summaries = {item["id"]: item for item in decision.evidence["assets"]}
+    assert summaries["heic-id"]["live_photo_video_id"] == "video-id"
+    assert summaries["jpeg-id"]["live_photo_video_id"] is None

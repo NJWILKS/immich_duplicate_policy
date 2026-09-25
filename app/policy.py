@@ -170,6 +170,26 @@ def _append_once(reasons: list[str], reason: str) -> None:
         reasons.append(reason)
 
 
+def _asset_summary(asset: dict[str, Any]) -> dict[str, Any]:
+    dimensions = _dimensions(asset)
+    capture_time = _capture_time(asset)
+    return {
+        "id": asset.get("id"),
+        "filename": str(asset.get("originalFileName") or ""),
+        "mime_type": asset.get("originalMimeType"),
+        "format": _format_of(asset),
+        "type": asset.get("type"),
+        "dimensions": list(dimensions) if dimensions else None,
+        "bytes": _file_size(asset),
+        "capture_time": capture_time.isoformat() if capture_time else None,
+        "live_photo_video_id": asset.get("livePhotoVideoId"),
+        "is_edited": bool(asset.get("isEdited")),
+        "is_offline": bool(asset.get("isOffline")),
+        "is_trashed": bool(asset.get("isTrashed")),
+        "stacked": bool(asset.get("stack")),
+    }
+
+
 def evaluate_duplicate_group(group: dict[str, Any]) -> Decision:
     duplicate_id = str(group.get("duplicateId") or "")
     assets = list(group.get("assets") or [])
@@ -178,6 +198,7 @@ def evaluate_duplicate_group(group: dict[str, Any]) -> Decision:
     evidence: dict[str, Any] = {
         "asset_count": len(assets),
         "immich_suggested_keep_asset_ids": suggested,
+        "assets": [_asset_summary(asset) for asset in assets],
     }
     reasons: list[str] = []
 

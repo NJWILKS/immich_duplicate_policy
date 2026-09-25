@@ -2,9 +2,9 @@
 
 Conservative policy service for reviewing Immich duplicate groups and identifying safe HEIC/HEIF-over-JPEG candidates.
 
-## v0.1 contract
+## v0.1.1 contract
 
-v0.1 is deliberately read-only. It uses Immich's `GET /api/duplicates` endpoint, evaluates each duplicate group, and writes an audit report. There is no resolve/delete API method in this release and `MODE` is hard-locked to `report`.
+v0.1.1 is deliberately read-only. It uses Immich's `GET /api/duplicates` endpoint, evaluates each duplicate group, and writes an audit report. There is no resolve/delete API method in this release and `MODE` is hard-locked to `report`.
 
 A group is marked `SAFE_HEIC_CANDIDATE` only when all of these are true:
 
@@ -33,7 +33,7 @@ MODE=report
 SCAN_INTERVAL_SECONDS=3600
 ```
 
-The API key only needs duplicate read access for v0.1.
+The API key only needs duplicate read access for v0.1.1.
 
 ## Docker
 
@@ -55,6 +55,8 @@ Two files are written under `state/`:
 - `decisions.jsonl` — append-only audit history.
 
 Each decision contains the duplicate group ID, proposed keeper/trash asset IDs when safe, reason codes for review cases, Immich's suggested keeper IDs, filenames, dimensions, capture-time delta, GPS distance where available, and file sizes where Immich exposes them.
+
+v0.1.1 also records a compact summary for every asset in every duplicate group, including format/MIME evidence, dimensions, file size, capture time, Live Photo relationship, edit/offline/trash flags, and stack membership. This does not change any decision rule; it exists so real REVIEW groups can be analysed safely before policy is relaxed.
 
 ## Development
 

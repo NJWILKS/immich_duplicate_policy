@@ -1,0 +1,21 @@
+services:
+  immich-duplicate-policy:
+    build: .
+    container_name: immich_duplicate_policy
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MODE: report
+      STATE_DIR: /state
+      SCAN_INTERVAL_SECONDS: ${SCAN_INTERVAL_SECONDS:-3600}
+      IMMICH_TIMEOUT_SECONDS: ${IMMICH_TIMEOUT_SECONDS:-30}
+    volumes:
+      - ./state:/state
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

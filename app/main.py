@@ -49,10 +49,32 @@ def scan_once(client: ImmichClient, state_dir: Path) -> int:
         record["scanned_at"] = started.isoformat()
         records.append(record)
 
+    counts = Counter(decision.kind.value for decision in decisions)
+    safe_basis_counts = Counter(
+        basis
+        for decision in decisions
+        if decision.kind is DecisionKind.SAFE_HEIC_CANDIDATE
+        for basis in decision.evidence.get("safe_basis", [])
+    )
+    review_reason_counts = Counter(
+        reason
+        for decision in decisions
+        if decision.kind is DecisionKind.REVIEW
+        for reason in decision.reasons
+    )
+
     latest_payload = {
         "run_id": run_id,
         "scanned_at": started.isoformat(),
         "duplicate_groups": len(groups),
+        "summary": {
+            "decisions": {
+                DecisionKind.SAFE_HEIC_CANDIDATE.value: counts[DecisionKind.SAFE_HEIC_CANDIDATE.value],
+                DecisionKind.REVIEW.value: counts[DecisionKind.REVIEW.value],
+            },
+            "safe_basis": dict(sorted(safe_basis_counts.items())),
+            "review_reasons": dict(sorted(review_reason_counts.items())),
+        },
         "decisions": records,
     }
     latest_path.write_text(
@@ -64,7 +86,6 @@ def scan_once(client: ImmichClient, state_dir: Path) -> int:
         for record in records:
             audit.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    counts = Counter(decision.kind.value for decision in decisions)
     safe = counts[DecisionKind.SAFE_HEIC_CANDIDATE.value]
     review = counts[DecisionKind.REVIEW.value]
 
@@ -72,6 +93,16 @@ def scan_once(client: ImmichClient, state_dir: Path) -> int:
         f"Scanned {len(groups):,} duplicate groups: "
         f"{safe:,} SAFE_HEIC_CANDIDATE, {review:,} REVIEW"
     )
+    if safe_basis_counts:
+        print(
+            "Safe basis: "
+            + ", ".join(f"{name}={count:,}" for name, count in sorted(safe_basis_counts.items()))
+        )
+    if review_reason_counts:
+        print(
+            "Review reasons: "
+            + ", ".join(f"{name}={count:,}" for name, count in sorted(review_reason_counts.items()))
+        )
     print(f"Latest report: {latest_path}")
     return len(groups)
 
@@ -80,7 +111,7 @@ def main() -> int:
     mode = os.getenv("MODE", "report").strip().casefold()
     if mode != "report":
         print(
-            "Only MODE=report is supported in v0.1; this build cannot modify Immich.",
+            "Only MODE=report is supported in v0.2; this build cannot modify Immich.",
             file=sys.stderr,
         )
         return 2

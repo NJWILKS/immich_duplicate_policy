@@ -90,6 +90,16 @@ def test_heif_and_jpeg_extensions_are_supported_case_insensitively():
     assert decision.keep_asset_id == "heif-id"
 
 
+def test_conflicting_mime_and_extension_requires_review():
+    heic = asset("heic-id", "IMG_0001.HEIC", mime="image/jpeg")
+    jpeg = asset("jpeg-id", "IMG_0001.JPG", mime="image/jpeg")
+
+    decision = evaluate_duplicate_group(group(heic=heic, jpeg=jpeg))
+
+    assert decision.kind is DecisionKind.REVIEW
+    assert "not_exact_heic_jpeg_pair" in decision.reasons
+
+
 def test_group_must_be_exactly_one_heic_and_one_jpeg():
     assets = [
         asset("heic-1", "IMG_1.HEIC", mime="image/heic"),

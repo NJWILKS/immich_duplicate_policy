@@ -39,13 +39,13 @@ The API key only needs duplicate read access for v0.1.
 
 ```bash
 cp .env.example .env
-mkdir -p state
+sudo install -d -o 10001 -g 10001 state
 docker compose up -d --build
 ```
 
 The default compose configuration scans once per hour. Set `SCAN_INTERVAL_SECONDS=0` to run once and exit.
 
-No ports are exposed. The container filesystem is read-only apart from the mounted `/state` directory.
+No ports are exposed. The container filesystem is read-only apart from the mounted `/state` directory. The image runs as UID/GID `10001:10001`, so the host `state/` directory must be writable by that identity.
 
 ## Reports
 

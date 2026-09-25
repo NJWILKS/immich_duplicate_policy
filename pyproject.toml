@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "immich-duplicate-policy"
+version = "0.1.0"
+description = "Conservative HEIC/JPEG duplicate policy service for Immich"
+requires-python = ">=3.12"
+dependencies = [
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3,<9",
+]
+
+[project.scripts]
+immich-duplicate-policy = "app.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

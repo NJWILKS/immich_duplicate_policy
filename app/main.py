@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.immich_client import ImmichClient, ImmichClientError
 from app.policy import DecisionKind, evaluate_duplicate_group
-from app.report import decision_to_record
+from app.report import build_review_diagnostics, decision_to_record
 
 
 def _required_env(name: str) -> str:
@@ -62,6 +62,7 @@ def scan_once(client: ImmichClient, state_dir: Path) -> int:
         if decision.kind is DecisionKind.REVIEW
         for reason in decision.reasons
     )
+    review_diagnostics = build_review_diagnostics(decisions)
 
     latest_payload = {
         "run_id": run_id,
@@ -74,6 +75,7 @@ def scan_once(client: ImmichClient, state_dir: Path) -> int:
             },
             "safe_basis": dict(sorted(safe_basis_counts.items())),
             "review_reasons": dict(sorted(review_reason_counts.items())),
+            "review_diagnostics": review_diagnostics,
         },
         "decisions": records,
     }
@@ -103,6 +105,47 @@ def scan_once(client: ImmichClient, state_dir: Path) -> int:
             "Review reasons: "
             + ", ".join(f"{name}={count:,}" for name, count in sorted(review_reason_counts.items()))
         )
+
+    not_exact = review_diagnostics["not_exact_heic_jpeg_pair"]
+    if not_exact["groups"]:
+        print(
+            "Not-exact HEIC/JPEG diagnostics: "
+            f"{not_exact['groups']:,} groups; "
+            "asset-count="
+            + ", ".join(
+                f"{name}:{count:,}"
+                for name, count in sorted(not_exact["asset_count"].items())
+            )
+        )
+        if not_exact["format_composition"]:
+            top_formats = sorted(
+                not_exact["format_composition"].items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:8]
+            print(
+                "  formats: "
+                + ", ".join(f"{name}={count:,}" for name, count in top_formats)
+            )
+        if not_exact["media_type_composition"]:
+            top_types = sorted(
+                not_exact["media_type_composition"].items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:8]
+            print(
+                "  media types: "
+                + ", ".join(f"{name}={count:,}" for name, count in top_types)
+            )
+        if not_exact["two_asset_filename_stems"]:
+            print(
+                "  two-asset stems: "
+                + ", ".join(
+                    f"{name}={count:,}"
+                    for name, count in sorted(
+                        not_exact["two_asset_filename_stems"].items()
+                    )
+                )
+            )
+
     print(f"Latest report: {latest_path}")
     return len(groups)
 

@@ -79,6 +79,20 @@ def test_scan_writes_latest_snapshot_and_append_only_audit(tmp_path):
     }
     assert latest["summary"]["safe_basis"] == {"exact_pair": 1}
     assert latest["summary"]["review_reasons"] == {}
+    assert latest["summary"]["review_diagnostics"] == {
+        "review_groups": 0,
+        "asset_count": {},
+        "format_composition": {},
+        "media_type_composition": {},
+        "two_asset_filename_stems": {},
+        "not_exact_heic_jpeg_pair": {
+            "groups": 0,
+            "asset_count": {},
+            "format_composition": {},
+            "media_type_composition": {},
+            "two_asset_filename_stems": {},
+        },
+    }
 
     lines = (tmp_path / "decisions.jsonl").read_text().splitlines()
     assert len(lines) == 2

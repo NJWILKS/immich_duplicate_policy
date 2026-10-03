@@ -6,6 +6,10 @@ Conservative policy service for reviewing Immich duplicate groups and automatica
 
 v0.3 keeps the v0.2 classification policy and adds a one-shot `MODE=apply`.
 
+### v0.3.1 report diagnostics
+
+v0.3.1 does not widen the automatic resolution policy. Report mode now adds a `review_diagnostics` section to `state/latest.json` so large REVIEW populations can be understood before any new resolver rule is considered. It reports review-group asset counts, format composition, media-type composition, and same/different filename stems for two-asset groups, plus the same breakdown specifically for `not_exact_heic_jpeg_pair` groups.
+
 The long-running Docker service remains `MODE=report`. Apply mode is intended to be run explicitly with `docker compose run --rm -e MODE=apply ...`; it never loops.
 
 Immediately before making any change, apply mode:
@@ -77,7 +81,7 @@ Apply refuses to run if Immich trash is disabled because Immich's duplicate reso
 
 Report mode writes:
 
-- `state/latest.json` — current duplicate snapshot and summary;
+- `state/latest.json` — current duplicate snapshot and summary, including non-destructive review-shape diagnostics;
 - `state/decisions.jsonl` — append-only classification history.
 
 Apply mode additionally writes:
